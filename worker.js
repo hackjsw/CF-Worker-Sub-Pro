@@ -1,5 +1,5 @@
 // --- 配置区 ---
-// (已移除密码配置)
+const AUTH_PASSWORD = "访问密码"; 
 // --------------
 
 // 区域关键词配置 (Key 为标准英文缩写)
@@ -22,11 +22,25 @@ export default {
     const url = new URL(request.url);
     const params = url.searchParams;
 
-    // 路由分发：如果有 template 参数或访问 /sub 路径，则处理订阅生成
+    // 路由分发
     if (url.pathname === '/sub' || params.has('template')) return this.handleSub(params);
 
-    // --- 鉴权逻辑已移除 ---
-    // 直接返回主界面
+    // --- 鉴权逻辑 ---
+    const cookie = request.headers.get("Cookie") || "";
+    if (params.get('pw') === AUTH_PASSWORD) {
+      return new Response(null, {
+        status: 302,
+        headers: { 
+          "Location": "/", 
+          "Set-Cookie": `auth=${AUTH_PASSWORD}; Path=/; HttpOnly; Max-Age=2592000; SameSite=Lax` 
+        }
+      });
+    }
+    if (!cookie.includes(`auth=${AUTH_PASSWORD}`)) {
+      return new Response(this.getLoginHTML(), { headers: { "Content-Type": "text/html;charset=UTF-8" } });
+    }
+    // --------------
+
     return new Response(this.getHTML(), { headers: { "Content-Type": "text/html;charset=UTF-8" } });
   },
 
@@ -36,6 +50,7 @@ export default {
     const rawMode = params.get('raw') === 'true'; 
     const jsonMode = params.get('format') === 'json'; 
     const filterRegions = params.get('regions');
+    const defaultRegion = params.get('default_region'); // 获取用户设置的默认地区
     
     if (!source || !template.includes('://')) {
         const msg = rawMode ? "Configuration Error" : "error://invalid-args?#ConfigurationError";
@@ -45,9 +60,9 @@ export default {
     }
     
     try {
-      let nodes = await this.processData(template, source);
+      // 将默认地区传给处理函数
+      let nodes = await this.processData(template, source, defaultRegion);
 
-      // 后端过滤逻辑
       if (filterRegions) {
           const targetRegions = filterRegions.split(',').filter(r => r.trim());
           if (targetRegions.length > 0) {
@@ -77,7 +92,8 @@ export default {
     }
   },
 
-  async processData(template, source) {
+  // 修改：接收 defaultRegion 参数
+  async processData(template, source, defaultRegion) {
     let urlObj;
     let originalProtocol = "vless";
 
@@ -109,7 +125,7 @@ export default {
       if (seen.has(key)) return;
       seen.add(key);
 
-      // 1. 强制解码备注
+      // 1. 解码备注
       let decodedName = name;
       try { 
           if(name.includes('%')) {
@@ -120,9 +136,15 @@ export default {
       }
 
       // 2. 识别区域
-      const region = this.identifyRegion(decodedName);
+      let region = this.identifyRegion(decodedName);
 
-      // 3. 生成标准化名称 (例如: SG 1)
+      // --- 关键修复：应用默认分类 ---
+      // 如果识别结果是 Others，且用户提供了 defaultRegion，则强制覆盖
+      if (region === 'Others' && defaultRegion && defaultRegion.trim() !== '') {
+          region = defaultRegion.trim();
+      }
+
+      // 3. 生成标准化名称
       if (!regionCounters[region]) regionCounters[region] = 0;
       regionCounters[region]++;
       const standardizedName = `${region} ${regionCounters[region]}`;
@@ -256,6 +278,14 @@ export default {
       return list;
   },
 
+  getLoginHTML() { 
+      return `<html><body style="background:#FDFBF7;color:#4A4A4A;display:flex;justify-content:center;align-items:center;height:100vh;font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+      <div style="text-align:center;background:#fff;padding:30px;border-radius:10px;box-shadow:0 4px 15px rgba(212,175,55,0.15);border:1px solid #E6D28C">
+      <h3 style="margin-top:0;color:#B8860B">访问验证</h3>
+      <input type="password" id="p" placeholder="Password" style="padding:10px;border-radius:4px;border:1px solid #D4AF37;background:#FFFAF0;color:#555;outline:none;width:200px;display:block;margin:15px auto">
+      <button onclick="location.href='?pw='+document.getElementById('p').value" style="padding:10px 30px;border-radius:20px;border:none;background:linear-gradient(135deg, #D4AF37 0%, #C5A028 100%);color:#fff;cursor:pointer;font-weight:bold;box-shadow:0 2px 5px rgba(184,134,11,0.3)">进入</button></div></body></html>`; 
+  },
+
   getHTML() {
     return `
 <!DOCTYPE html>
@@ -263,7 +293,7 @@ export default {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>优选订阅生成 Pro (Open)</title>
+    <title>优选订阅生成 Pro</title>
     <style>
         body { 
             background: #FDFBF7; 
@@ -500,13 +530,18 @@ export default {
             try {
                 CURRENT_BASE_URL = window.location.origin + '/sub?template=' + encodeURIComponent(t) + '&source=' + encodeURIComponent(s);
                 
+                // 关键修复：将前端输入框的值传给后端
+                if (defReg) {
+                    CURRENT_BASE_URL += '&default_region=' + encodeURIComponent(defReg);
+                }
+                
                 const resp = await fetch(CURRENT_BASE_URL + '&format=json');
                 if (!resp.ok) throw new Error("网络请求失败或参数过长");
                 const nodes = await resp.json();
 
                 document.getElementById('hiddenSubUrl').value = CURRENT_BASE_URL;
                 
-                processFrontendData(nodes, defReg);
+                processFrontendData(nodes);
                 
                 document.getElementById('outSub').style.display = 'block';
                 document.getElementById('outRegion').style.display = 'block';
@@ -518,16 +553,11 @@ export default {
             }
         }
 
-        function processFrontendData(nodes, defaultRegionName) {
+        function processFrontendData(nodes) {
             GLOBAL_REGION_MAP = {}; 
             
             nodes.forEach(node => {
                 let region = node.region;
-                
-                if (region === 'Others' && defaultRegionName) {
-                    region = defaultRegionName;
-                }
-                
                 if (!GLOBAL_REGION_MAP[region]) GLOBAL_REGION_MAP[region] = [];
                 GLOBAL_REGION_MAP[region].push(node);
             });
