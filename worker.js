@@ -50,7 +50,7 @@ export default {
     const rawMode = params.get('raw') === 'true'; 
     const jsonMode = params.get('format') === 'json'; 
     const filterRegions = params.get('regions');
-    const defaultRegion = params.get('default_region'); // 获取用户设置的默认地区
+    const defaultRegion = params.get('default_region');
     
     if (!source || !template.includes('://')) {
         const msg = rawMode ? "Configuration Error" : "error://invalid-args?#ConfigurationError";
@@ -60,7 +60,6 @@ export default {
     }
     
     try {
-      // 将默认地区传给处理函数
       let nodes = await this.processData(template, source, defaultRegion);
 
       if (filterRegions) {
@@ -92,7 +91,6 @@ export default {
     }
   },
 
-  // 修改：接收 defaultRegion 参数
   async processData(template, source, defaultRegion) {
     let urlObj;
     let originalProtocol = "vless";
@@ -113,7 +111,8 @@ export default {
 
     const results = [];
     const seen = new Set();
-    const regionCounters = {}; 
+    // 移除计数器，改用详细命名
+    // const regionCounters = {}; 
 
     extractedList.forEach((item) => {
       let { host, port, name } = item;
@@ -137,24 +136,31 @@ export default {
 
       // 2. 识别区域
       let region = this.identifyRegion(decodedName);
-
-      // --- 关键修复：应用默认分类 ---
-      // 如果识别结果是 Others，且用户提供了 defaultRegion，则强制覆盖
       if (region === 'Others' && defaultRegion && defaultRegion.trim() !== '') {
           region = defaultRegion.trim();
       }
 
-      // 3. 生成标准化名称
-      if (!regionCounters[region]) regionCounters[region] = 0;
-      regionCounters[region]++;
-      const standardizedName = `${region} ${regionCounters[region]}`;
-
+      // 3. 生成新链接对象
       const newLink = new URL(urlObj.toString());
       newLink.hostname = host;
       newLink.port = finalPort;
-      newLink.search = newLink.searchParams.toString();
+      newLink.search = newLink.searchParams.toString(); // 修复 search 参数
+
+      // --- 核心修改：生成详细命名 (地区-端口-协议-TLS) ---
+      // 获取传输协议 (type, network 或默认 tcp)
+      const type = newLink.searchParams.get("type") || newLink.searchParams.get("network") || "tcp";
+      const upperType = type.toUpperCase();
+
+      // 获取 TLS 状态
+      const security = newLink.searchParams.get("security") || newLink.searchParams.get("encryption") || "none";
+      const isTLS = (security === 'tls' || security === 'xtls' || security === 'reality' || security === 'auto');
+      const tlsTag = isTLS ? "-TLS" : "";
+
+      // 拼接名称: HK-443-WS-TLS
+      const standardizedName = `${region}-${finalPort}-${upperType}${tlsTag}`;
+      // ------------------------------------------------
+
       newLink.hash = encodeURIComponent(standardizedName);
-      
       const finalLinkStr = newLink.toString().replace(/^http:\/\//, `${originalProtocol}://`);
 
       results.push({
@@ -471,7 +477,7 @@ export default {
     </style>
 </head>
 <body>
-    <h2>优选订阅生成 Pro</h2>
+    <h2>优选订阅生成 Pro (Standard)</h2>
     
     <p>1. 模板链接 (支持 vless / trojan / hysteria2 / ss 等):</p>
     <textarea id="temp" placeholder="vless://uuid@domain:443?params..."></textarea>
@@ -530,7 +536,6 @@ export default {
             try {
                 CURRENT_BASE_URL = window.location.origin + '/sub?template=' + encodeURIComponent(t) + '&source=' + encodeURIComponent(s);
                 
-                // 关键修复：将前端输入框的值传给后端
                 if (defReg) {
                     CURRENT_BASE_URL += '&default_region=' + encodeURIComponent(defReg);
                 }
