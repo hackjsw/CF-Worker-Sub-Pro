@@ -1,5 +1,5 @@
 // --- 配置区 ---
-const AUTH_PASSWORD = "访问密码"; 
+const AUTH_PASSWORD = "123456";  //默认访问密码123456
 // --------------
 
 // 区域关键词配置 (Key 为标准英文缩写)
@@ -651,3 +651,4 @@ export default {
 </html>`;
   }
 };
+
