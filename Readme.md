@@ -52,6 +52,9 @@
 ## ⚙️ 配置 (Configuration)
 
 代码顶部包含简单的配置区：
+```javascript
+const AUTH_PASSWORD = "123456"; //默认访问密码123456
+```
 
 ```javascript
 // 区域关键词配置 (Key 为标准英文缩写)
@@ -64,4 +67,5 @@ const REGION_CONFIG = {
 ```
 ⚠️ 免责声明 (Disclaimer)
 本项目仅供学习、技术研究和测试使用。请勿用于非法用途。开发者对使用本项目产生的任何后果不承担法律责任。
+
 
