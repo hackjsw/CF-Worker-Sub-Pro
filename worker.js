@@ -1,6 +1,8 @@
 
 // --- 配置区 ---
 const AUTH_PASSWORD = "123456"; // 默认访问密码
+const DEFAULT_CF_POOL_URL = "https://raw.githubusercontent.com/cmliu/CFcdnVmess2sub/main/ipv4.txt";
+const DEFAULT_CF_POOL_FALLBACK = "1.1.1.1:443\n1.0.0.1:443\n104.16.0.0:443\n104.17.0.0:443";
 // --------------
 
 // 区域关键词配置 (Key 为显示名称)
@@ -20,7 +22,59 @@ const REGION_CONFIG = {
     "🚀 优选": ["优选", "Cloudflare", "CF", "CDN", "🚀"]
 };
 
+function encodeBase64(str) {
+    return btoa(unescape(encodeURIComponent(str)));
+}
+
+function decodeBase64(str) {
+    const normalized = str.replace(/\s/g, '').replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+    const raw = atob(padded);
+    try {
+        return decodeURIComponent(escape(raw));
+    } catch {
+        return raw;
+    }
+}
+
+function parseSSUri(ssLink) {
+    const raw = ssLink.replace(/^ss:\/\//i, '');
+    const [withoutHash] = raw.split('#');
+    const [core] = withoutHash.split('?');
+
+    let decoded = '';
+    if (core.includes('@')) {
+        decoded = core;
+    } else {
+        decoded = decodeBase64(core);
+    }
+
+    const [authPart = '', hostPart = ''] = decoded.split('@');
+    const splitAt = authPart.indexOf(':');
+    const method = splitAt >= 0 ? authPart.slice(0, splitAt) : '';
+    const password = splitAt >= 0 ? authPart.slice(splitAt + 1) : '';
+
+    return { method, password, hostPart };
+}
+
 export default {
+    async fetchDefaultPoolText() {
+        try {
+            const resp = await fetch(DEFAULT_CF_POOL_URL, {
+                headers: {
+                    'User-Agent': 'CF-Worker-Sub-Pro/1.0',
+                    'Accept': 'text/plain'
+                },
+                cf: { cacheTtl: 600, cacheEverything: true }
+            });
+            if (!resp.ok) return DEFAULT_CF_POOL_FALLBACK;
+            const text = (await resp.text()).trim();
+            return text || DEFAULT_CF_POOL_FALLBACK;
+        } catch {
+            return DEFAULT_CF_POOL_FALLBACK;
+        }
+    },
+
     async fetch(request, env) {
         const url = new URL(request.url);
         const params = url.searchParams;
@@ -30,6 +84,7 @@ export default {
 
         if (url.pathname === '/sub' || params.has('template')) return this.handleSub(params);
         if (url.pathname === '/test') return this.handleTest(request);
+        if (url.pathname === '/scan') return this.handleScan(request);
         if (url.pathname === '/clash' || url.pathname === '/clash.yaml') return this.handleClash(params);
         if (url.pathname === '/singbox' || url.pathname === '/singbox.json') return this.handleSingbox(params);
 
@@ -56,16 +111,20 @@ export default {
 
     async handleSub(params) {
         const template = decodeURIComponent(params.get('template') || '');
-        const source = decodeURIComponent(params.get('source') || '');
+        let source = decodeURIComponent(params.get('source') || '');
         const rawMode = params.get('raw') === 'true';
         const jsonMode = params.get('format') === 'json';
         const filterRegions = params.get('regions');
         const defaultRegion = params.get('default_region');
 
-        if (!source || !template.includes('://')) {
+        if (!source) {
+            source = await this.fetchDefaultPoolText();
+        }
+
+        if (!template.includes('://')) {
             const msg = "配置错误: 请检查模板和来源";
             if (jsonMode) return new Response(JSON.stringify({ error: msg }), { headers: { "Content-Type": "application/json" } });
-            return new Response(rawMode ? msg : btoa(msg), { status: 400 });
+            return new Response(rawMode ? msg : encodeBase64(msg), { status: 400 });
         }
 
         try {
@@ -82,7 +141,7 @@ export default {
             const uniqueNodes = [];
             const seen = new Set();
             nodes.forEach(node => {
-                const key = `${node.ip}:${node.port}`;
+                const key = `${node.protocol}:${node.ip}:${node.port}`;
                 if (!seen.has(key)) {
                     seen.add(key);
                     uniqueNodes.push(node);
@@ -101,12 +160,12 @@ export default {
                 return new Response(allIps, { headers: { "Content-Type": "text/plain;charset=UTF-8" } });
             } else {
                 const subText = nodes.map(n => n.link).join('\n');
-                return new Response(btoa(subText), { headers: { "Content-Type": "text/plain;charset=UTF-8" } });
+                return new Response(encodeBase64(subText), { headers: { "Content-Type": "text/plain;charset=UTF-8" } });
             }
 
         } catch (err) {
             const errMsg = `Processing Error: ${err.message}`;
-            return new Response(rawMode ? errMsg : btoa(`error://internal?#${encodeURIComponent(errMsg)}`), {
+            return new Response(rawMode ? errMsg : encodeBase64(`error://internal?#${encodeURIComponent(errMsg)}`), {
                 status: 500,
                 headers: { "Content-Type": "text/plain;charset=UTF-8" }
             });
@@ -116,6 +175,7 @@ export default {
     async processData(template, source, defaultRegion) {
         let urlObj;
         let originalProtocol = "vless";
+        let ssAuthPart = "";
 
         try {
             // 提取协议头
@@ -123,9 +183,21 @@ export default {
             if (protocolMatch) {
                 originalProtocol = protocolMatch[1].toLowerCase();
             }
-            // 临时替换协议头以便 URL 解析
-            const httpUrl = template.replace(/^[a-z0-9\+\-\.]+:\/\//i, 'http://');
-            urlObj = new URL(httpUrl);
+            if (originalProtocol === 'ss') {
+                const { method, password, hostPart } = parseSSUri(template);
+                ssAuthPart = `${method}:${password}`;
+                if (!ssAuthPart || !ssAuthPart.includes(':')) {
+                    throw new Error('SS 模板缺少 method:password 信息');
+                }
+                const rawTemplate = template.replace(/^ss:\/\//i, '');
+                const [withoutHash] = rawTemplate.split('#');
+                const query = withoutHash.includes('?') ? `?${withoutHash.split('?')[1]}` : '';
+                urlObj = new URL(`http://${hostPart || '127.0.0.1:443'}${query}`);
+            } else {
+                // 临时替换协议头以便 URL 解析
+                const httpUrl = template.replace(/^[a-z0-9\+\-\.]+:\/\//i, 'http://');
+                urlObj = new URL(httpUrl);
+            }
         } catch (e) {
             throw new Error("模板格式无效");
         }
@@ -171,12 +243,15 @@ export default {
             const cleanRegion = region.replace(/[\u{1F1E0}-\u{1F1FF}\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\s]/gu, '').trim();
             const standardizedName = `${cleanRegion}-${finalPort}-${type.toUpperCase()}${tlsTag}`;
 
-            newLink.hash = encodeURIComponent(standardizedName);
-
-            // 还原协议头
-            let finalLinkStr = newLink.toString().replace(/^http:\/\//, `${originalProtocol}://`);
-
-            // 特殊处理 ShadowSocks 等非标准 URL 格式 (暂只支持标准 ss://base64 格式，此处主要处理 vless/trojan/vmess 链接结构)
+            let finalLinkStr;
+            if (originalProtocol === 'ss') {
+                const encodedCore = encodeBase64(`${ssAuthPart}@${host}:${finalPort}`).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+                const query = newLink.search ? newLink.search : '';
+                finalLinkStr = `ss://${encodedCore}${query}#${encodeURIComponent(standardizedName)}`;
+            } else {
+                newLink.hash = encodeURIComponent(standardizedName);
+                finalLinkStr = newLink.toString().replace(/^http:\/\//, `${originalProtocol}://`);
+            }
 
             results.push({
                 ip: host,
@@ -300,6 +375,87 @@ export default {
         }
     },
 
+    async measureIpLatency(ip, port, timeoutMs = 3000) {
+        const start = Date.now();
+        const testUrl = `http://${ip}:${port}`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+            await fetch(testUrl, {
+                method: 'HEAD',
+                signal: controller.signal
+            });
+            return { ok: true, latency: Date.now() - start };
+        } catch {
+            return { ok: false, latency: -1 };
+        } finally {
+            clearTimeout(timeoutId);
+        }
+    },
+
+    async handleScan(request) {
+        if (request.method !== 'POST') {
+            return new Response('Method not allowed', { status: 405 });
+        }
+
+        try {
+            const body = await request.json();
+            let rawIps = String(body.ips || '');
+            const maxLatency = Math.max(1, parseInt(body.maxLatency || 300, 10));
+            const maxCount = Math.max(1, parseInt(body.maxCount || 10, 10));
+            const defaultPort = Math.max(1, parseInt(body.port || 443, 10));
+            const timeoutMs = Math.max(500, parseInt(body.timeout || 3000, 10));
+
+            if (!rawIps.trim()) {
+                rawIps = await this.fetchDefaultPoolText();
+            }
+
+            const candidates = this.parseNodeList(rawIps.split(/[\n\r,]+/).filter(Boolean))
+                .map(item => ({
+                    ip: item.host,
+                    port: item.port || String(defaultPort)
+                }));
+
+            if (!candidates.length) {
+                return new Response(JSON.stringify({ error: '未识别到有效 IP 列表' }), {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            }
+
+            const scanned = await Promise.all(candidates.map(async (target) => {
+                const result = await this.measureIpLatency(target.ip, target.port, timeoutMs);
+                return {
+                    ...target,
+                    status: result.ok ? 'ok' : 'fail',
+                    latency: result.latency
+                };
+            }));
+
+            const fastest = scanned
+                .filter(item => item.status === 'ok' && item.latency <= maxLatency)
+                .sort((a, b) => a.latency - b.latency)
+                .slice(0, maxCount);
+
+            return new Response(JSON.stringify({
+                total: scanned.length,
+                matched: fastest.length,
+                maxLatency,
+                maxCount,
+                fastest,
+                failed: scanned.filter(item => item.status === 'fail').length
+            }), {
+                headers: { 'Content-Type': 'application/json' }
+            });
+        } catch (err) {
+            return new Response(JSON.stringify({ error: err.message }), {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+    },
+
 
 
     convertToClash(nodes) {
@@ -317,7 +473,9 @@ proxies:
 
         nodes.forEach(node => {
             const protocol = node.protocol.toLowerCase();
-            const urlObj = new URL(node.link.replace(new RegExp(`^${protocol}://`, 'i'), 'http://'));
+            const urlObj = (protocol === 'vless' || protocol === 'trojan')
+                ? new URL(node.link.replace(new RegExp(`^${protocol}://`, 'i'), 'http://'))
+                : null;
 
             if (protocol === 'vless' || protocol === 'trojan') {
                 const security = urlObj.searchParams.get('security') || 'none';
@@ -346,6 +504,18 @@ proxies:
 
                 yaml += '\n';
             }
+
+            if (protocol === 'ss') {
+                const { method, password } = parseSSUri(node.link);
+
+                yaml += `  - name: "${node.name}"\n`;
+                yaml += `    type: ss\n`;
+                yaml += `    server: ${node.ip}\n`;
+                yaml += `    port: ${node.port}\n`;
+                yaml += `    cipher: ${method || 'aes-256-gcm'}\n`;
+                yaml += `    password: "${password}"\n`;
+                yaml += `    udp: true\n\n`;
+            }
         });
 
         yaml += `proxy-groups:
@@ -368,7 +538,9 @@ rules:
     convertToSingbox(nodes) {
         const outbounds = nodes.map(node => {
             const protocol = node.protocol.toLowerCase();
-            const urlObj = new URL(node.link.replace(new RegExp(`^${protocol}://`, 'i'), 'http://'));
+            const urlObj = (protocol === 'vless' || protocol === 'trojan')
+                ? new URL(node.link.replace(new RegExp(`^${protocol}://`, 'i'), 'http://'))
+                : null;
 
             const base = {
                 tag: node.name,
@@ -399,6 +571,10 @@ rules:
                     enabled: true,
                     server_name: urlObj.searchParams.get('sni') || urlObj.hostname
                 };
+            } else if (protocol === 'ss') {
+                const { method, password } = parseSSUri(node.link);
+                base.method = method || 'aes-256-gcm';
+                base.password = password;
             }
 
             return base;
@@ -462,10 +638,7 @@ rules:
                     let decoded = text;
                     if (!text.includes('://')) {
                         try {
-                            // 简单的 Base64 清洗和解码
-                            let safeText = text.replace(/\s/g, '').replace(/-/g, '+').replace(/_/g, '/');
-                            while (safeText.length % 4) safeText += '=';
-                            decoded = atob(safeText);
+                            decoded = decodeBase64(text);
                         } catch (e) {
                             // 解码失败可能本身就是明文 IP 列表
                             decoded = text;
@@ -512,7 +685,7 @@ rules:
                                 ipPortStr = base64Part.split('@')[1];
                             } else {
                                 // 旧格式 base64(method:password@ip:port)
-                                const decoded = atob(base64Part.replace(/-/g, '+').replace(/_/g, '/'));
+                                const decoded = decodeBase64(base64Part);
                                 ipPortStr = decoded.split('@')[1] || decoded; // 容错
                             }
                             if (ipPortStr) {
@@ -560,8 +733,8 @@ rules:
                 // 简单校验 Host
                 if (host) {
                     host = host.split(/[?\/]/)[0].trim().replace(/^\[|\]$/g, '');
-                    // 过滤非法字符
-                    if (host.length < 3 || host.length > 64 || /[^a-zA-Z0-9.:\-]/.test(host)) return;
+                    // 过滤非法字符，放宽长度以支持较长域名/IPv6
+                    if (host.length < 2 || host.length > 255 || /[^a-zA-Z0-9.:\-]/.test(host)) return;
 
                     // 如果没有端口，默认不处理? 改为保留空端口，后续逻辑处理
                     if (host) list.push({ host, port, name });
@@ -617,6 +790,7 @@ rules:
             --accent: #8b5cf6;
             --success: #10b981;
             --danger: #ef4444;
+            --surface-soft: rgba(255, 255, 255, 0.35);
             --shadow: 0 8px 32px rgba(31, 38, 135, 0.15);
             --input-bg: rgba(255, 255, 255, 0.5);
         }
@@ -632,6 +806,7 @@ rules:
                 --accent: #a78bfa;
                 --success: #34d399;
                 --danger: #f87171;
+                --surface-soft: rgba(255, 255, 255, 0.08);
                 --shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
                 --input-bg: rgba(255, 255, 255, 0.05);
             }
@@ -713,6 +888,23 @@ rules:
             margin: 0;
             font-weight: 500;
             letter-spacing: 0.5px;
+        }
+
+        .quick-tips {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .tip {
+            background: var(--surface-soft);
+            border: 1px solid var(--glass-border);
+            border-radius: 14px;
+            padding: 10px 12px;
+            font-size: 12px;
+            color: var(--text-second);
+            font-weight: 600;
         }
         
         @keyframes fadeInDown {
@@ -942,14 +1134,52 @@ rules:
         
         <div class="card">
             <div class="form-group">
-                <label class="label">节点模板 (支持 VLESS/Trojan 等)</label>
-                <input type="text" id="template" placeholder="vless://uuid@domain:443?security=tls&..." autocomplete="off">
+                <label class="label">节点模板 (支持 VLESS / Trojan / SS)</label>
+                <input type="text" id="template" placeholder="vless://uuid@domain:443?security=tls&... 或 ss://base64..." autocomplete="off">
+                <div style="margin-top:6px; font-size:12px; color:var(--text-second);">说明：这是目标协议模板，系统会把来源中的 IP:端口 批量替换到这个模板里生成订阅链接。</div>
             </div>
             <div class="form-group">
                 <label class="label">节点来源 (订阅链接 / IP列表 / 单节点)</label>
                 <textarea id="source" rows="5" placeholder="必须包含端口，例如:&#10;192.168.1.1:443&#10;https://sub.example.com/feed"></textarea>
+                <div style="margin-top:6px; font-size:12px; color:var(--text-second);">说明：可填订阅链接、IP:端口 列表、或单条节点。不填时自动使用默认 CF 公开节点池。</div>
+            </div>
+            <div class="quick-tips">
+                <div class="tip">✨ 自动识别区域并标准化命名</div>
+                <div class="tip">🧩 SS 模板可批量替换目标 IP:Port</div>
+                <div class="tip">🛡️ 一键导出 Clash / Sing-box 配置</div>
             </div>
             <button id="generateBtn" class="btn" onclick="generate()">开始生成订阅</button>
+        </div>
+
+        <div class="card">
+            <label class="label">IP 扫描器（筛选最快 IP）</label>
+            <div class="form-group">
+                <textarea id="scanSource" rows="4" placeholder="输入待扫描 IP，可带端口。示例：&#10;1.1.1.1:443&#10;8.8.8.8:443"></textarea>
+                <div style="margin-top:6px; font-size:12px; color:var(--text-second);">说明：逐行输入候选 IP（可带端口）。为空时自动使用默认 CF 公开节点池。</div>
+            </div>
+            <div class="tools" style="margin-bottom:12px;">
+                <div style="flex:1; min-width:130px;">
+                    <div style="font-size:12px; color:var(--text-second); margin-bottom:6px;">最大延迟阈值（ms）</div>
+                    <input id="scanLatency" type="number" min="1" value="300" placeholder="例如：300">
+                </div>
+                <div style="flex:1; min-width:130px;">
+                    <div style="font-size:12px; color:var(--text-second); margin-bottom:6px;">保留最快数量（个）</div>
+                    <input id="scanCount" type="number" min="1" value="10" placeholder="例如：10">
+                </div>
+                <div style="flex:1; min-width:130px;">
+                    <div style="font-size:12px; color:var(--text-second); margin-bottom:6px;">默认端口</div>
+                    <input id="scanPort" type="number" min="1" value="443" placeholder="例如：443">
+                </div>
+            </div>
+            <div style="margin:-6px 0 10px; font-size:12px; color:var(--text-second);">说明：最大延迟=保留阈值；保留数量=最终输出前 N 个最快 IP；默认端口用于未显式填写端口的 IP。</div>
+            <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
+                <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text-second);">
+                    <input id="scanAutoApply" type="checkbox" checked>
+                    扫描后自动回填到“节点来源”并立即生成订阅
+                </label>
+            </div>
+            <button id="scanBtn" class="btn" onclick="scanIps()">⚡ 扫描并筛选最快 IP</button>
+            <div id="scanResult" style="margin-top:12px; font-size:13px; color:var(--text-second);"></div>
         </div>
 
         <div id="result" class="result-area">
@@ -985,14 +1215,15 @@ rules:
     <div id="toast" class="toast">已复制到剪贴板</div>
 
     <script>
-        let GLOBAL_DATA = { url: '', nodes: [], regions: {}, testResults: [] };
+        const DEFAULT_POOL_URL = '${DEFAULT_CF_POOL_URL}';
+        let GLOBAL_DATA = { url: '', nodes: [], regions: {}, testResults: [], scanFastest: [] };
 
         async function generate() {
             const template = document.getElementById('template').value.trim();
             const source = document.getElementById('source').value.trim();
             const btn = document.getElementById('generateBtn');
 
-            if (!template || !source) return showToast('请填写完整信息');
+            if (!template) return showToast('请先填写节点模板');
             if (!template.includes('://')) return showToast('模板格式不正确');
 
             btn.disabled = true;
@@ -1002,7 +1233,7 @@ rules:
                 // 构建 API 请求
                 const apiUrl = new URL(window.location.origin + '/sub');
                 apiUrl.searchParams.set('template', template);
-                apiUrl.searchParams.set('source', source);
+                apiUrl.searchParams.set('source', source || DEFAULT_POOL_URL);
                 apiUrl.searchParams.set('format', 'json');
 
                 const resp = await fetch(apiUrl);
@@ -1077,7 +1308,29 @@ rules:
         }
 
         function copyText(str) {
-            navigator.clipboard.writeText(str).then(() => showToast('已复制'));
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(str).then(() => showToast('已复制')).catch(() => fallbackCopy(str));
+                return;
+            }
+            fallbackCopy(str);
+        }
+
+        function fallbackCopy(str) {
+            const textarea = document.createElement('textarea');
+            textarea.value = str;
+            textarea.style.position = 'fixed';
+            textarea.style.left = '-9999px';
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+            try {
+                document.execCommand('copy');
+                showToast('已复制');
+            } catch (e) {
+                showToast('复制失败，请手动复制');
+            } finally {
+                document.body.removeChild(textarea);
+            }
         }
 
         function showToast(msg) {
@@ -1155,7 +1408,7 @@ rules:
                 results.forEach(r => {
                     const statusColor = r.status === 'ok' ? 'var(--success)' : '#ff3b30';
                     const statusText = r.status === 'ok' ? '✅ ' + r.latency + 'ms' : '❌ 不可达';
-                    html += '<div style="display:flex; justify-content:space-between; padding:8px; background:var(--bg-color); border-radius:8px;">';
+                    html += '<div style="display:flex; justify-content:space-between; padding:8px; background:var(--surface-soft); border-radius:8px;">';
                     html += '<span>' + r.ip + ':' + r.port + '</span>';
                     html += '<span style="color:' + statusColor + '; font-weight:600">' + statusText + '</span>';
                     html += '</div>';
@@ -1177,6 +1430,77 @@ rules:
                 showToast('测试完成');
             } catch (e) {
                 contentDiv.innerHTML = '<div style="color:#ff3b30">测试失败: ' + e.message + '</div>';
+            }
+        }
+
+        async function scanIps() {
+            const source = document.getElementById('scanSource').value.trim();
+            const finalSource = source || DEFAULT_POOL_URL;
+
+            const maxLatency = parseInt(document.getElementById('scanLatency').value || '300', 10);
+            const maxCount = parseInt(document.getElementById('scanCount').value || '10', 10);
+            const port = parseInt(document.getElementById('scanPort').value || '443', 10);
+            const resultBox = document.getElementById('scanResult');
+            const btn = document.getElementById('scanBtn');
+
+            btn.disabled = true;
+            btn.innerText = '扫描中...';
+            resultBox.innerHTML = '🔄 正在扫描，请稍候...';
+
+            try {
+                const resp = await fetch('/scan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ips: finalSource, maxLatency, maxCount, port })
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.error || '扫描失败');
+
+                if (!data.fastest || !data.fastest.length) {
+                    resultBox.innerHTML = '<div>未找到延迟 ≤ ' + data.maxLatency + 'ms 的可用 IP。</div>';
+                    return;
+                }
+
+                const lines = data.fastest.map(item => item.ip + ':' + item.port + '  (' + item.latency + 'ms)');
+                const plainIps = data.fastest.map(item => item.ip + ':' + item.port).join('\\n');
+                const encodedPlainIps = encodeURIComponent(plainIps);
+                GLOBAL_DATA.scanFastest = data.fastest;
+
+                resultBox.innerHTML =
+                    '<div style="margin-bottom:8px;color:var(--success);font-weight:600;">命中 ' + data.matched + ' 个（总扫描 ' + data.total + '，失败 ' + data.failed + '）</div>' +
+                    '<div style="display:grid;gap:6px; margin-bottom:10px;">' +
+                    lines.map(function (l) { return '<div style="background:var(--surface-soft);padding:8px;border-radius:8px;">' + l + '</div>'; }).join('') +
+                    '</div>' +
+                    '<div class="tools" style="margin:0;">' +
+                    '<button class="tool-btn" onclick="copyText(decodeURIComponent(\\\'' + encodedPlainIps + '\\\'))">复制结果 IP 列表</button>' +
+                    '<button class="tool-btn" onclick="applyScannedIpsToSource(false)">仅回填来源</button>' +
+                    '<button class="tool-btn" onclick="applyScannedIpsToSource(true)">回填并生成订阅</button>' +
+                    '</div>';
+
+                if (document.getElementById('scanAutoApply').checked) {
+                    await applyScannedIpsToSource(true);
+                }
+
+                showToast('扫描完成');
+            } catch (e) {
+                resultBox.innerHTML = '<div style="color:#ff3b30;">扫描失败: ' + e.message + '</div>';
+            } finally {
+                btn.disabled = false;
+                btn.innerText = '⚡ 扫描并筛选最快 IP';
+            }
+        }
+
+        async function applyScannedIpsToSource(andGenerate) {
+            if (!GLOBAL_DATA.scanFastest || !GLOBAL_DATA.scanFastest.length) {
+                showToast('暂无可回填的扫描结果');
+                return;
+            }
+            const source = GLOBAL_DATA.scanFastest.map(item => item.ip + ':' + item.port).join('\\n');
+            document.getElementById('source').value = source;
+            showToast('已回填到节点来源');
+
+            if (andGenerate) {
+                await generate();
             }
         }
 
