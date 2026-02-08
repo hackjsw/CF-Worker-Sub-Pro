@@ -57,7 +57,6 @@ function parseSSUri(ssLink) {
     return { method, password, hostPart };
 }
 
-codex/add-ss-support-and-beautify-ui-e1oo24
 export default {
     async fetchDefaultPoolText() {
         try {
@@ -77,7 +76,6 @@ export default {
     },
 
     async fetch(request, env) {
-        main
         const url = new URL(request.url);
         const params = url.searchParams;
 
@@ -119,6 +117,15 @@ export default {
         const filterRegions = params.get('regions');
         const defaultRegion = params.get('default_region');
 
+        if (!source) {
+            source = await this.fetchDefaultPoolText();
+        }
+
+        if (!template.includes('://')) {
+            const msg = "配置错误: 请检查模板和来源";
+            if (jsonMode) return new Response(JSON.stringify({ error: msg }), { headers: { "Content-Type": "application/json" } });
+            return new Response(rawMode ? msg : encodeBase64(msg), { status: 400 });
+        }
         codex/add-ss-support-and-beautify-ui-e1oo24
         if (!source) {
             source = await this.fetchDefaultPoolText();
@@ -376,6 +383,87 @@ export default {
             return new Response(JSON.stringify({ error: err.message }), {
                 status: 500,
                 headers: { "Content-Type": "application/json" }
+            });
+        }
+    },
+
+    async measureIpLatency(ip, port, timeoutMs = 3000) {
+        const start = Date.now();
+        const testUrl = `http://${ip}:${port}`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+            await fetch(testUrl, {
+                method: 'HEAD',
+                signal: controller.signal
+            });
+            return { ok: true, latency: Date.now() - start };
+        } catch {
+            return { ok: false, latency: -1 };
+        } finally {
+            clearTimeout(timeoutId);
+        }
+    },
+
+    async handleScan(request) {
+        if (request.method !== 'POST') {
+            return new Response('Method not allowed', { status: 405 });
+        }
+
+        try {
+            const body = await request.json();
+            let rawIps = String(body.ips || '');
+            const maxLatency = Math.max(1, parseInt(body.maxLatency || 300, 10));
+            const maxCount = Math.max(1, parseInt(body.maxCount || 10, 10));
+            const defaultPort = Math.max(1, parseInt(body.port || 443, 10));
+            const timeoutMs = Math.max(500, parseInt(body.timeout || 3000, 10));
+
+            if (!rawIps.trim()) {
+                rawIps = await this.fetchDefaultPoolText();
+            }
+
+            const candidates = this.parseNodeList(rawIps.split(/[\n\r,]+/).filter(Boolean))
+                .map(item => ({
+                    ip: item.host,
+                    port: item.port || String(defaultPort)
+                }));
+
+            if (!candidates.length) {
+                return new Response(JSON.stringify({ error: '未识别到有效 IP 列表' }), {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            }
+
+            const scanned = await Promise.all(candidates.map(async (target) => {
+                const result = await this.measureIpLatency(target.ip, target.port, timeoutMs);
+                return {
+                    ...target,
+                    status: result.ok ? 'ok' : 'fail',
+                    latency: result.latency
+                };
+            }));
+
+            const fastest = scanned
+                .filter(item => item.status === 'ok' && item.latency <= maxLatency)
+                .sort((a, b) => a.latency - b.latency)
+                .slice(0, maxCount);
+
+            return new Response(JSON.stringify({
+                total: scanned.length,
+                matched: fastest.length,
+                maxLatency,
+                maxCount,
+                fastest,
+                failed: scanned.filter(item => item.status === 'fail').length
+            }), {
+                headers: { 'Content-Type': 'application/json' }
+            });
+        } catch (err) {
+            return new Response(JSON.stringify({ error: err.message }), {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' }
             });
         }
     },
@@ -1142,19 +1230,15 @@ rules:
         </div>
         
         <div class="card">
-        codex/add-ss-support-and-beautify-ui-e1oo24
             <div class="form-group">
                 <label class="label">节点模板 (支持 VLESS / Trojan / SS)</label>
                 <input type="text" id="template" placeholder="vless://uuid@domain:443?security=tls&... 或 ss://base64..." autocomplete="off">
                 <div style="margin-top:6px; font-size:12px; color:var(--text-second);">说明：这是目标协议模板，系统会把来源中的 IP:端口 批量替换到这个模板里生成订阅链接。</div>
-        main
             </div>
             <div class="form-group">
                 <label class="label">节点来源 (订阅链接 / IP列表 / 单节点)</label>
                 <textarea id="source" rows="5" placeholder="必须包含端口，例如:&#10;192.168.1.1:443&#10;https://sub.example.com/feed"></textarea>
-        codex/add-ss-support-and-beautify-ui-e1oo24
                 <div style="margin-top:6px; font-size:12px; color:var(--text-second);">说明：可填订阅链接、IP:端口 列表、或单条节点。不填时自动使用默认 CF 公开节点池。</div>
-        main
             </div>
             <div class="quick-tips">
                 <div class="tip">✨ 自动识别区域并标准化命名</div>
@@ -1168,7 +1252,6 @@ rules:
             <label class="label">IP 扫描器（筛选最快 IP）</label>
             <div class="form-group">
                 <textarea id="scanSource" rows="4" placeholder="输入待扫描 IP，可带端口。示例：&#10;1.1.1.1:443&#10;8.8.8.8:443"></textarea>
-        codex/add-ss-support-and-beautify-ui-e1oo24
                 <div style="margin-top:6px; font-size:12px; color:var(--text-second);">说明：逐行输入候选 IP（可带端口）。为空时自动使用默认 CF 公开节点池。</div>
             </div>
             <div class="tools" style="margin-bottom:12px;">
@@ -1185,8 +1268,7 @@ rules:
                     <input id="scanPort" type="number" min="1" value="443" placeholder="例如：443">
                 </div>
             </div>
-            <div style="margin:-6px 0 10px; font-size:12px; color:var(--text-second);">说明：最大延迟=保留阈值；保留数量=最终输出前 N 个最快 IP；默认端口用于未显式填写端口的 IP。</div>
-        main
+            <div style="margin:-6px 0 10px; font-size:12px; color:var(--text-second);">说明：最大延迟=保留阈值（越小通常越快）；保留数量=最终输出前 N 个最快 IP；默认端口用于未显式填写端口的 IP。</div>
             <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
                 <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text-second);">
                     <input id="scanAutoApply" type="checkbox" checked>
@@ -1229,10 +1311,8 @@ rules:
     
     <div id="toast" class="toast">已复制到剪贴板</div>
 
-        codex/add-ss-support-and-beautify-ui-e1oo24
     <script>
         const DEFAULT_POOL_URL = '${DEFAULT_CF_POOL_URL}';
-        main
         let GLOBAL_DATA = { url: '', nodes: [], regions: {}, testResults: [], scanFastest: [] };
 
         async function generate() {
@@ -1447,6 +1527,77 @@ rules:
                 showToast('测试完成');
             } catch (e) {
                 contentDiv.innerHTML = '<div style="color:#ff3b30">测试失败: ' + e.message + '</div>';
+            }
+        }
+
+        async function scanIps() {
+            const source = document.getElementById('scanSource').value.trim();
+            const finalSource = source || DEFAULT_POOL_URL;
+
+            const maxLatency = parseInt(document.getElementById('scanLatency').value || '300', 10);
+            const maxCount = parseInt(document.getElementById('scanCount').value || '10', 10);
+            const port = parseInt(document.getElementById('scanPort').value || '443', 10);
+            const resultBox = document.getElementById('scanResult');
+            const btn = document.getElementById('scanBtn');
+
+            btn.disabled = true;
+            btn.innerText = '扫描中...';
+            resultBox.innerHTML = '🔄 正在扫描，请稍候...';
+
+            try {
+                const resp = await fetch('/scan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ips: finalSource, maxLatency, maxCount, port })
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.error || '扫描失败');
+
+                if (!data.fastest || !data.fastest.length) {
+                    resultBox.innerHTML = '<div>未找到延迟 ≤ ' + data.maxLatency + 'ms 的可用 IP。</div>';
+                    return;
+                }
+
+                const lines = data.fastest.map(item => item.ip + ':' + item.port + '  (' + item.latency + 'ms)');
+                const plainIps = data.fastest.map(item => item.ip + ':' + item.port).join('\\n');
+                const encodedPlainIps = encodeURIComponent(plainIps);
+                GLOBAL_DATA.scanFastest = data.fastest;
+
+                resultBox.innerHTML =
+                    '<div style="margin-bottom:8px;color:var(--success);font-weight:600;">命中 ' + data.matched + ' 个（总扫描 ' + data.total + '，失败 ' + data.failed + '）</div>' +
+                    '<div style="display:grid;gap:6px; margin-bottom:10px;">' +
+                    lines.map(function (l) { return '<div style="background:var(--surface-soft);padding:8px;border-radius:8px;">' + l + '</div>'; }).join('') +
+                    '</div>' +
+                    '<div class="tools" style="margin:0;">' +
+                    '<button class="tool-btn" onclick="copyText(decodeURIComponent(\\\'' + encodedPlainIps + '\\\'))">复制结果 IP 列表</button>' +
+                    '<button class="tool-btn" onclick="applyScannedIpsToSource(false)">仅回填来源</button>' +
+                    '<button class="tool-btn" onclick="applyScannedIpsToSource(true)">回填并生成订阅</button>' +
+                    '</div>';
+
+                if (document.getElementById('scanAutoApply').checked) {
+                    await applyScannedIpsToSource(true);
+                }
+
+                showToast('扫描完成');
+            } catch (e) {
+                resultBox.innerHTML = '<div style="color:#ff3b30;">扫描失败: ' + e.message + '</div>';
+            } finally {
+                btn.disabled = false;
+                btn.innerText = '⚡ 扫描并筛选最快 IP';
+            }
+        }
+
+        async function applyScannedIpsToSource(andGenerate) {
+            if (!GLOBAL_DATA.scanFastest || !GLOBAL_DATA.scanFastest.length) {
+                showToast('暂无可回填的扫描结果');
+                return;
+            }
+            const source = GLOBAL_DATA.scanFastest.map(item => item.ip + ':' + item.port).join('\\n');
+            document.getElementById('source').value = source;
+            showToast('已回填到节点来源');
+
+            if (andGenerate) {
+                await generate();
             }
         }
 
