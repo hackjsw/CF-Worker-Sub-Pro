@@ -57,6 +57,7 @@ function parseSSUri(ssLink) {
     return { method, password, hostPart };
 }
 
+codex/add-ss-support-and-beautify-ui-e1oo24
 export default {
     async fetchDefaultPoolText() {
         try {
@@ -76,6 +77,7 @@ export default {
     },
 
     async fetch(request, env) {
+        main
         const url = new URL(request.url);
         const params = url.searchParams;
 
@@ -117,6 +119,7 @@ export default {
         const filterRegions = params.get('regions');
         const defaultRegion = params.get('default_region');
 
+        codex/add-ss-support-and-beautify-ui-e1oo24
         if (!source) {
             source = await this.fetchDefaultPoolText();
         }
@@ -126,6 +129,8 @@ export default {
             if (jsonMode) return new Response(JSON.stringify({ error: msg }), { headers: { "Content-Type": "application/json" } });
             return new Response(rawMode ? msg : encodeBase64(msg), { status: 400 });
         }
+        
+        main
 
         try {
             let nodes = await this.processData(template, source, defaultRegion);
@@ -401,16 +406,20 @@ export default {
 
         try {
             const body = await request.json();
+        codex/add-ss-support-and-beautify-ui-e1oo24
             let rawIps = String(body.ips || '');
+        main
             const maxLatency = Math.max(1, parseInt(body.maxLatency || 300, 10));
             const maxCount = Math.max(1, parseInt(body.maxCount || 10, 10));
             const defaultPort = Math.max(1, parseInt(body.port || 443, 10));
             const timeoutMs = Math.max(500, parseInt(body.timeout || 3000, 10));
 
+        codex/add-ss-support-and-beautify-ui-e1oo24
             if (!rawIps.trim()) {
                 rawIps = await this.fetchDefaultPoolText();
             }
 
+        main
             const candidates = this.parseNodeList(rawIps.split(/[\n\r,]+/).filter(Boolean))
                 .map(item => ({
                     ip: item.host,
@@ -1133,15 +1142,19 @@ rules:
         </div>
         
         <div class="card">
+        codex/add-ss-support-and-beautify-ui-e1oo24
             <div class="form-group">
                 <label class="label">节点模板 (支持 VLESS / Trojan / SS)</label>
                 <input type="text" id="template" placeholder="vless://uuid@domain:443?security=tls&... 或 ss://base64..." autocomplete="off">
                 <div style="margin-top:6px; font-size:12px; color:var(--text-second);">说明：这是目标协议模板，系统会把来源中的 IP:端口 批量替换到这个模板里生成订阅链接。</div>
+        main
             </div>
             <div class="form-group">
                 <label class="label">节点来源 (订阅链接 / IP列表 / 单节点)</label>
                 <textarea id="source" rows="5" placeholder="必须包含端口，例如:&#10;192.168.1.1:443&#10;https://sub.example.com/feed"></textarea>
+        codex/add-ss-support-and-beautify-ui-e1oo24
                 <div style="margin-top:6px; font-size:12px; color:var(--text-second);">说明：可填订阅链接、IP:端口 列表、或单条节点。不填时自动使用默认 CF 公开节点池。</div>
+        main
             </div>
             <div class="quick-tips">
                 <div class="tip">✨ 自动识别区域并标准化命名</div>
@@ -1155,6 +1168,7 @@ rules:
             <label class="label">IP 扫描器（筛选最快 IP）</label>
             <div class="form-group">
                 <textarea id="scanSource" rows="4" placeholder="输入待扫描 IP，可带端口。示例：&#10;1.1.1.1:443&#10;8.8.8.8:443"></textarea>
+        codex/add-ss-support-and-beautify-ui-e1oo24
                 <div style="margin-top:6px; font-size:12px; color:var(--text-second);">说明：逐行输入候选 IP（可带端口）。为空时自动使用默认 CF 公开节点池。</div>
             </div>
             <div class="tools" style="margin-bottom:12px;">
@@ -1172,6 +1186,7 @@ rules:
                 </div>
             </div>
             <div style="margin:-6px 0 10px; font-size:12px; color:var(--text-second);">说明：最大延迟=保留阈值；保留数量=最终输出前 N 个最快 IP；默认端口用于未显式填写端口的 IP。</div>
+        main
             <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
                 <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text-second);">
                     <input id="scanAutoApply" type="checkbox" checked>
@@ -1214,8 +1229,10 @@ rules:
     
     <div id="toast" class="toast">已复制到剪贴板</div>
 
+        codex/add-ss-support-and-beautify-ui-e1oo24
     <script>
         const DEFAULT_POOL_URL = '${DEFAULT_CF_POOL_URL}';
+        main
         let GLOBAL_DATA = { url: '', nodes: [], regions: {}, testResults: [], scanFastest: [] };
 
         async function generate() {
@@ -1435,7 +1452,9 @@ rules:
 
         async function scanIps() {
             const source = document.getElementById('scanSource').value.trim();
+        codex/add-ss-support-and-beautify-ui-e1oo24
             const finalSource = source || DEFAULT_POOL_URL;
+        main
 
             const maxLatency = parseInt(document.getElementById('scanLatency').value || '300', 10);
             const maxCount = parseInt(document.getElementById('scanCount').value || '10', 10);
@@ -1451,7 +1470,9 @@ rules:
                 const resp = await fetch('/scan', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
+        codex/add-ss-support-and-beautify-ui-e1oo24
                     body: JSON.stringify({ ips: finalSource, maxLatency, maxCount, port })
+        main
                 });
                 const data = await resp.json();
                 if (!resp.ok) throw new Error(data.error || '扫描失败');
