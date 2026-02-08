@@ -126,6 +126,18 @@ export default {
             if (jsonMode) return new Response(JSON.stringify({ error: msg }), { headers: { "Content-Type": "application/json" } });
             return new Response(rawMode ? msg : encodeBase64(msg), { status: 400 });
         }
+        codex/add-ss-support-and-beautify-ui-e1oo24
+        if (!source) {
+            source = await this.fetchDefaultPoolText();
+        }
+
+        if (!template.includes('://')) {
+            const msg = "配置错误: 请检查模板和来源";
+            if (jsonMode) return new Response(JSON.stringify({ error: msg }), { headers: { "Content-Type": "application/json" } });
+            return new Response(rawMode ? msg : encodeBase64(msg), { status: 400 });
+        }
+        
+        main
 
         try {
             let nodes = await this.processData(template, source, defaultRegion);
@@ -411,6 +423,91 @@ export default {
                 rawIps = await this.fetchDefaultPoolText();
             }
 
+            const candidates = this.parseNodeList(rawIps.split(/[\n\r,]+/).filter(Boolean))
+                .map(item => ({
+                    ip: item.host,
+                    port: item.port || String(defaultPort)
+                }));
+
+            if (!candidates.length) {
+                return new Response(JSON.stringify({ error: '未识别到有效 IP 列表' }), {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            }
+
+            const scanned = await Promise.all(candidates.map(async (target) => {
+                const result = await this.measureIpLatency(target.ip, target.port, timeoutMs);
+                return {
+                    ...target,
+                    status: result.ok ? 'ok' : 'fail',
+                    latency: result.latency
+                };
+            }));
+
+            const fastest = scanned
+                .filter(item => item.status === 'ok' && item.latency <= maxLatency)
+                .sort((a, b) => a.latency - b.latency)
+                .slice(0, maxCount);
+
+            return new Response(JSON.stringify({
+                total: scanned.length,
+                matched: fastest.length,
+                maxLatency,
+                maxCount,
+                fastest,
+                failed: scanned.filter(item => item.status === 'fail').length
+            }), {
+                headers: { 'Content-Type': 'application/json' }
+            });
+        } catch (err) {
+            return new Response(JSON.stringify({ error: err.message }), {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+    },
+
+    async measureIpLatency(ip, port, timeoutMs = 3000) {
+        const start = Date.now();
+        const testUrl = `http://${ip}:${port}`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+            await fetch(testUrl, {
+                method: 'HEAD',
+                signal: controller.signal
+            });
+            return { ok: true, latency: Date.now() - start };
+        } catch {
+            return { ok: false, latency: -1 };
+        } finally {
+            clearTimeout(timeoutId);
+        }
+    },
+
+    async handleScan(request) {
+        if (request.method !== 'POST') {
+            return new Response('Method not allowed', { status: 405 });
+        }
+
+        try {
+            const body = await request.json();
+        codex/add-ss-support-and-beautify-ui-e1oo24
+            let rawIps = String(body.ips || '');
+        main
+            const maxLatency = Math.max(1, parseInt(body.maxLatency || 300, 10));
+            const maxCount = Math.max(1, parseInt(body.maxCount || 10, 10));
+            const defaultPort = Math.max(1, parseInt(body.port || 443, 10));
+            const timeoutMs = Math.max(500, parseInt(body.timeout || 3000, 10));
+
+        codex/add-ss-support-and-beautify-ui-e1oo24
+            if (!rawIps.trim()) {
+                rawIps = await this.fetchDefaultPoolText();
+            }
+
+        main
             const candidates = this.parseNodeList(rawIps.split(/[\n\r,]+/).filter(Boolean))
                 .map(item => ({
                     ip: item.host,
@@ -1452,6 +1549,81 @@ rules:
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ ips: finalSource, maxLatency, maxCount, port })
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.error || '扫描失败');
+
+                if (!data.fastest || !data.fastest.length) {
+                    resultBox.innerHTML = '<div>未找到延迟 ≤ ' + data.maxLatency + 'ms 的可用 IP。</div>';
+                    return;
+                }
+
+                const lines = data.fastest.map(item => item.ip + ':' + item.port + '  (' + item.latency + 'ms)');
+                const plainIps = data.fastest.map(item => item.ip + ':' + item.port).join('\\n');
+                const encodedPlainIps = encodeURIComponent(plainIps);
+                GLOBAL_DATA.scanFastest = data.fastest;
+
+                resultBox.innerHTML =
+                    '<div style="margin-bottom:8px;color:var(--success);font-weight:600;">命中 ' + data.matched + ' 个（总扫描 ' + data.total + '，失败 ' + data.failed + '）</div>' +
+                    '<div style="display:grid;gap:6px; margin-bottom:10px;">' +
+                    lines.map(function (l) { return '<div style="background:var(--surface-soft);padding:8px;border-radius:8px;">' + l + '</div>'; }).join('') +
+                    '</div>' +
+                    '<div class="tools" style="margin:0;">' +
+                    '<button class="tool-btn" onclick="copyText(decodeURIComponent(\\\'' + encodedPlainIps + '\\\'))">复制结果 IP 列表</button>' +
+                    '<button class="tool-btn" onclick="applyScannedIpsToSource(false)">仅回填来源</button>' +
+                    '<button class="tool-btn" onclick="applyScannedIpsToSource(true)">回填并生成订阅</button>' +
+                    '</div>';
+
+                if (document.getElementById('scanAutoApply').checked) {
+                    await applyScannedIpsToSource(true);
+                }
+
+                showToast('扫描完成');
+            } catch (e) {
+                resultBox.innerHTML = '<div style="color:#ff3b30;">扫描失败: ' + e.message + '</div>';
+            } finally {
+                btn.disabled = false;
+                btn.innerText = '⚡ 扫描并筛选最快 IP';
+            }
+        }
+
+        async function applyScannedIpsToSource(andGenerate) {
+            if (!GLOBAL_DATA.scanFastest || !GLOBAL_DATA.scanFastest.length) {
+                showToast('暂无可回填的扫描结果');
+                return;
+            }
+            const source = GLOBAL_DATA.scanFastest.map(item => item.ip + ':' + item.port).join('\\n');
+            document.getElementById('source').value = source;
+            showToast('已回填到节点来源');
+
+            if (andGenerate) {
+                await generate();
+            }
+        }
+
+        async function scanIps() {
+            const source = document.getElementById('scanSource').value.trim();
+        codex/add-ss-support-and-beautify-ui-e1oo24
+            const finalSource = source || DEFAULT_POOL_URL;
+        main
+
+            const maxLatency = parseInt(document.getElementById('scanLatency').value || '300', 10);
+            const maxCount = parseInt(document.getElementById('scanCount').value || '10', 10);
+            const port = parseInt(document.getElementById('scanPort').value || '443', 10);
+            const resultBox = document.getElementById('scanResult');
+            const btn = document.getElementById('scanBtn');
+
+            btn.disabled = true;
+            btn.innerText = '扫描中...';
+            resultBox.innerHTML = '🔄 正在扫描，请稍候...';
+
+            try {
+                const resp = await fetch('/scan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+        codex/add-ss-support-and-beautify-ui-e1oo24
+                    body: JSON.stringify({ ips: finalSource, maxLatency, maxCount, port })
+        main
                 });
                 const data = await resp.json();
                 if (!resp.ok) throw new Error(data.error || '扫描失败');
