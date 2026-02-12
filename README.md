@@ -321,6 +321,7 @@ const CF_NON_TLS_PORTS = new Set(['80', '8080', '8880', '2052', '2082', '2086', 
 感谢以下项目和技术的支持：
 - [Cloudflare Workers](https://workers.cloudflare.com/)
 - [v2ray](https://www.v2ray.com/)
+- [佬王的订阅转换](https://github.com/eooce/sub-converter)
 - 社区用户的 Bug 反馈与建议
 
 ---
