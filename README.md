@@ -180,7 +180,7 @@ const CF_NON_TLS_PORTS = new Set(['80', '8080', '8880', '2052', '2082', '2086', 
 ### 🐛 关键 Bug 修复：Path 参数完整性问题
 
 **问题描述：**  
-当模板中的 `path` 参数包含多个查询参数时（例如 `/?ed=2048&proxyip=kr.william.us.ci`），生成的订阅链接会丢失 `&` 符号后的内容。
+当模板中的 `path` 参数包含多个查询参数时（例如 `/?ed=2048&proxyip=***.******.****`），生成的订阅链接会丢失 `&` 符号后的内容。
 
 **影响场景：**
 - ❌ **EdgeTunnel** 的 ProxyIP 功能无法使用
@@ -189,10 +189,10 @@ const CF_NON_TLS_PORTS = new Set(['80', '8080', '8880', '2052', '2082', '2086', 
 
 **修复效果对比：**
 ```diff
-模板: path=/?ed=2048&proxyip=kr.william.us.ci
+模板: path=/?ed=2048&proxyip=***.******.****
 
-- 修复前: path=/?ed=2048  ❌ 丢失 &proxyip=kr.william.us.ci
-+ 修复后: path=/?ed=2048&proxyip=kr.william.us.ci  ✅ 完整保留
+- 修复前: path=/?ed=2048  ❌ 丢失 &proxyip=***.******.****
++ 修复后: path=/?ed=2048&proxyip=***.******.****  ✅ 完整保留
 ```
 
 **技术改进：**
